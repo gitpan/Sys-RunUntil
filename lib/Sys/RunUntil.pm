@@ -1,20 +1,23 @@
 package Sys::RunUntil;
 
-# Set version
-# Make sure we're strict
+$VERSION= '0.03';
 
-$VERSION = '0.02';
+# be as strict as possible
 use strict;
 
-# Satisfy -require-
+# constants we need
+use constant SIGALIVE =>  0;
+use constant SIGINFO  => 29;
+use constant SIGTERM  => 15;
 
+# satisfy -require-
 1;
 
-#---------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 #
 # Standard Perl functionality
 #
-#---------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 # import
 #
 # Called during execution of "use"
@@ -23,135 +26,114 @@ use strict;
 #      2 runtime of script
 
 sub import {
+    my ( undef, $runtime )= @_;
 
-# Obtain the initial run time
-# Die now if nothing to check
-
-    my $runtime = $_[1];
+    # huh?
     die "Must specify a time until which the script should run\n"
-     unless defined $runtime;
+      if !defined $runtime;
 
-# Initialize CPU time flag if wallclock identifier given
-# Set CPU flag if so specified
-# Die now if invalid characters found
+    # set CPU flag
+    my $cpu= ( $runtime =~ s#[cC]## );
+    $cpu= undef if $runtime =~ s#[wW]##;
 
-    my $cpu = ($runtime =~ s#[cC]##);
-    $cpu = undef if $runtime =~ s#[wW]##;
+    # huh?
     die "Unrecognizable runtime specified: $runtime\n"
-     unless $runtime =~ m#^[sSmMhHdD\d]+$#;
+      if $runtime !~ m#^[sSmMhHdD\d]+$#;
 
-# Convert seconds into seconds
-# Convert minutes into seconds
-# Convert hours into seconds
-# Convert days into seconds
+    # calculate number of seconds
+    my $seconds= 0;
+    $seconds += $1             if $runtime =~ m#(\d+)[sS]?#;
+    $seconds += ( 60 * $1 )    if $runtime =~ m#(\d+)[mM]#;
+    $seconds += ( 3600 * $1 )  if $runtime =~ m#(\+?\d+)[hH]#;
+    $seconds += ( 86400 * $1 ) if $runtime =~ m#(\+?\d+)[dD]#;
 
-    my $seconds = 0;
-    $seconds += $1           if $runtime =~ m#(\d+)[sS]?#;
-    $seconds += (60 * $1)    if $runtime =~ m#(\d+)[mM]#;
-    $seconds += (3600 * $1)  if $runtime =~ m#(\+?\d+)[hH]#;
-    $seconds += (86400 * $1) if $runtime =~ m#(\+?\d+)[dD]#;
-
-# If we're only allowing so much CPU
-#  Create a single pipe (from child to parent)
-#  Perform the fork
-#  Die now if the fork failed
-
+    # only allowing so much CPU
     if ($cpu) {
-        pipe my $child,my $parent;
-        my $pid = fork();
-        die "Could not fork: $!\n" unless defined $pid;
 
-#  If we're in the child process
-#   Close the reading part on this end
-#   Make sure we can autoflush
-#   Make sure the pipe to the parent flushes
+        # set up pipe to child
+        pipe my $child, my $parent;
+        my $pid= fork();
+        die "Could not fork: $!\n" unless defined $pid;
         
-        unless ($pid) {
+        # in child, make sure we will flush
+        if ( !$pid ) {
             close $child;
             require IO::Handle;
             $parent->autoflush;
 
-#   Install a signal handler which
-#    Obtain the CPU time info
-#    Calculate the total
-#    Send that to the parent, rounded
-#   Return now to let the child do its thing
-
-            $SIG{INFO} = sub {
-                my @time = times;
-                my $time = $time[0] + $time[1] + $time[2] + $time[3];
+            # install signal handler for fetching information
+            $SIG{INFO}= sub {
+                my @time= times;
+                my $time= $time[0] + $time[1] + $time[2] + $time[3];
                 printf $parent "%.0f\n",$time;
             };
+
+            # let the child process do its thing
             return;
         }        
 
-#  Install a signal handler that will exit parent process if child exits
+        # exit parent process whenever child exits
+        $SIG{CHLD}= sub { exit };
 
-        $SIG{CHLD} = sub { exit };
-
-#  Close the writing part of the pipe on this end
-#  Initialize CPU time burnt so far
-#  While we have a child process and not all CPU time burnt
-#   Sleep for the minimum time until CPU cycles burnt
-#   Signal the child to tell its CPU usage
-#   Until we received word from the child
-#    Check if the child still runs, exit if child no longer there
-#   Obtain time spent from child, exit if child no longer there
-
+        # set up for reading
         close $parent;
-        my $rbits; vec( $rbits,fileno( $child ),1 ) = 1;
-        my $burnt = 0;
-        while ($burnt < $seconds) {
+        my $rbits;
+        vec( $rbits, fileno( $child), 1 )= 1;
+
+        # while not all CPU has been burnt
+        my $burnt= 0;
+        while ( $burnt < $seconds ) {
             sleep $seconds - $burnt;
-            kill 29,$pid;
-            until (select $rbits,undef,undef,1) {
-                exit unless kill 0,$pid;
+
+            # what are you doing?
+            kill SIGINFO, $pid;
+            until ( select $rbits, undef, undef, 1 ) {
+                exit if kill SIGALIVE, $pid;
             }
-            exit unless defined( $burnt = <$child> );
+
+            # child gone
+            exit if !defined( $burnt= readline $child );
         }
 
-#  Kill the child process
-#  And exit
-
-        kill 15,$pid;
+        # child has overstayed its welcome
+        kill SIGTERM, $pid;
         exit;
+    }
 
-# Else (only interested in wallclock)
-#  Perform the fork
-#  Die now if the fork failed
-#  Return now if we're in the child process
+    # only interested in wallclock
+    else {
+        my $pid= fork();
+        die "Could not fork: $!\n" if !defined $pid;
 
-    } else {
-        my $pid = fork();
-        die "Could not fork: $!\n" unless defined $pid;
-        return unless $pid;  
+        # we're in the child, do what you want to do
+        return if !$pid;  
 
-#  Set the alarm handler which
-#   Kills the child process
-#   And does an exit, indicating a problem
-
-        $SIG{ALRM} = sub {
-            kill 15,$pid;
+        # set up alarm handler that will kill child
+        $SIG{ALRM}= sub {
+            kill SIGTERM, $pid;
             exit 1;
         };
 
-#  Set the alarm
-#  Wait for the child process to return
-#  Exit now, we're done okidoki
-
+        # wait for the child
         alarm $seconds;
         wait;
+
+        # we're done
         exit;
     }
 } #import
 
-#---------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 
 __END__
 
 =head1 NAME
 
 Sys::RunUntil - make sure script only runs for the given time
+
+=head1 VERSION
+
+This documentation describes version 0.03.
 
 =head1 SYNOPSIS
 
@@ -227,7 +209,7 @@ L<Sys::RunAlone>, L<Sys::RunAlways>.
 
 =head1 COPYRIGHT
 
-Copyright (c) 2005 Elizabeth Mattijsen <liz@dijkmat.nl>. All rights
+Copyright (c) 2005, 2012 Elizabeth Mattijsen <liz@dijkmat.nl>. All rights
 reserved.  This program is free software; you can redistribute it and/or
 modify it under the same terms as Perl itself.
 
