@@ -11,7 +11,7 @@ Required Modules:
  (none)
 
 Version:
- 0.03
+ 0.04
 
 perl Makefile.PL
 make

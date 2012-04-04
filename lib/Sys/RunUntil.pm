@@ -1,6 +1,6 @@
 package Sys::RunUntil;
 
-$VERSION= '0.03';
+$VERSION= '0.04';
 
 # be as strict as possible
 use strict;
@@ -133,7 +133,7 @@ Sys::RunUntil - make sure script only runs for the given time
 
 =head1 VERSION
 
-This documentation describes version 0.03.
+This documentation describes version 0.04.
 
 =head1 SYNOPSIS
 
